@@ -50,6 +50,13 @@ jobs:
       - name: test
         run: pnpm vitest run
 
+      - name: upgrade npm (Trusted Publishing needs >= 11.5)
+        # Node 22 ships with npm 10.9. npm's OIDC trusted-publishing
+        # flow was added in npm 11.5, so we explicitly upgrade. pnpm
+        # publish delegates to `npm publish` for the actual registry
+        # call, so the bundled npm version is what matters.
+        run: npm install -g npm@latest
+
       - name: publish to npm
         # --provenance opts into npm's OIDC trusted-publishing flow.
         # No NPM_TOKEN env needed; the GH Actions OIDC token + the
