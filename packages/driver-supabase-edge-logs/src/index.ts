@@ -74,10 +74,15 @@ interface SbEdgeFunction {
  *  overlap so a late event doesn't slip between polls; downstream
  *  `dedup` (by .id) drops the duplicates a wide window produces. */
 function buildLogsSql(): string {
+  // function_edge_logs.metadata struct exposes:
+  //   deployment_id STRING, execution_time_ms INT64,
+  //   function_id STRING, version STRING
+  // (HTTP method/status are NOT here — they live on edge_logs which
+  // is the API-gateway table; function logs only carry the
+  // invocation envelope.)
   return [
     "SELECT id, function_edge_logs.timestamp AS timestamp, event_message,",
     "  m.function_id AS function_id, m.deployment_id AS deployment_id,",
-    "  m.method AS method, m.status_code AS status_code,",
     "  m.execution_time_ms AS execution_time_ms",
     "FROM function_edge_logs",
     "CROSS JOIN UNNEST(metadata) AS m",
@@ -157,25 +162,20 @@ export const supabaseEdgeLogsDriver: ProviderDriver<SupabaseCredentials> = {
     const sql = buildLogsSql();
     const url =
       `https://api.supabase.com/v1/projects/\${SUPABASE_PROJECT_REF}/analytics/endpoints/logs.all?sql=${encodeURIComponent(sql)}`;
+    // Branch on credential kind. Static bearers (PATs) drive Vector's
+    // native http_client directly. Refreshable bearers (OAuth) need
+    // logtura-http-client as a sidecar exec source because Vector's
+    // http_client can't refresh tokens — see
+    // https://github.com/vectordotdev/vector/discussions/17192.
+    const isRefreshable = connection.credentialKind === "refreshable";
+    const sourceYaml = isRefreshable
+      ? execSidecarYaml(connKey, url)
+      : httpClientYaml(url);
     const components: VectorComponent[] = [
       {
         key: sourceKey,
         kind: "source",
-        yaml: [
-          `    type: http_client`,
-          `    endpoint: ${JSON.stringify(url)}`,
-          `    method: GET`,
-          // 30s poll matches the SQL's 90s lookback (3x overlap).
-          // One poll per connection regardless of selection size,
-          // so the analytics endpoint's rate limit stays
-          // unstressed.
-          `    interval_secs: 30`,
-          `    headers:`,
-          // http_client headers want map<string, array<string>>.
-          `      authorization: ["Bearer \${SUPABASE_PAT}"]`,
-          `    decoding:`,
-          `      codec: json`,
-        ].join("\n"),
+        yaml: sourceYaml,
       },
       {
         key: normalizeKey,
@@ -186,6 +186,38 @@ export const supabaseEdgeLogsDriver: ProviderDriver<SupabaseCredentials> = {
     const runtime = sbRuntimeSpec({
       helpUrl: "https://supabase.com/dashboard/account/tokens",
     });
+    // For refreshable credentials, swap PAT-sourced env vars for the
+    // bearer_refresh trio: a connection-scoped JWT, the SaaS token
+    // endpoint URL, and the project ref. SUPABASE_PAT goes away.
+    if (isRefreshable) {
+      runtime.envVars = [
+        {
+          name: "LOGTURA_TAIL_TOKEN",
+          description:
+            "Connection-scoped JWT the sidecar binary uses to call back into Logtura's SaaS for fresh Supabase access tokens.",
+          source: "credential",
+          credentialPath: "tailToken",
+        },
+        {
+          name: "LOGTURA_TAIL_TOKEN_URL",
+          description:
+            "URL the sidecar binary POSTs to for fresh Supabase access tokens. Logtura SaaS endpoint.",
+          source: "credential",
+          credentialPath: "tailTokenUrl",
+        },
+        ...runtime.envVars.filter((v) => v.name === "SUPABASE_PROJECT_REF"),
+      ];
+      // Pin the sidecar image to an exact tag so Docker layer hashes
+      // by version. Bumping the tag forces a re-pull on the next
+      // forwarder build; otherwise BuildKit caches the COPY layer at
+      // the registry level and reuses it across deploys.
+      runtime.dockerfileDeps = [
+        {
+          directive:
+            "COPY --from=ghcr.io/logtura/logtura-http-client:v0.1.2 /logtura-http-client /usr/local/bin/logtura-http-client",
+        },
+      ];
+    }
     const manifest: DriverPipeline["manifest"] = [
       {
         id: sourceKey,
@@ -214,6 +246,79 @@ export const supabaseEdgeLogsDriver: ProviderDriver<SupabaseCredentials> = {
     };
   },
 };
+
+/** PAT path: Vector polls Supabase directly via http_client.
+ *  `${SUPABASE_PAT}` resolves at startup from the deployment env. */
+function httpClientYaml(url: string): string {
+  return [
+    `    type: http_client`,
+    `    endpoint: ${JSON.stringify(url)}`,
+    `    method: GET`,
+    // 30s poll matches the SQL's 90s lookback (3x overlap). One poll
+    // per connection regardless of selection size — the analytics
+    // endpoint rate-limits aggressively.
+    `    interval_secs: 30`,
+    `    headers:`,
+    // http_client headers want map<string, array<string>>.
+    `      authorization: ["Bearer \${SUPABASE_PAT}"]`,
+    `    decoding:`,
+    `      codec: json`,
+  ].join("\n");
+}
+
+/** Refreshable path: exec-source sidecar (logtura-http-client) holds
+ *  the connection-scoped JWT and exchanges it with Logtura's SaaS for
+ *  a fresh Supabase access token before each poll. Config is written
+ *  via a shell heredoc so the entire pipeline lives in vector.yaml
+ *  with no extra files in the deploy bundle.
+ *
+ *  Why heredoc-inline vs a separate config file: the OSS DriverPipeline
+ *  contract today emits Vector components, not auxiliary files. Inline
+ *  keeps the change minimal and lets us extend the contract later if
+ *  this approach grows arms. */
+function execSidecarYaml(connKey: string, endpoint: string): string {
+  // Single-quoted heredoc keeps shell from expanding `${LOGTURA_…}`
+  // tokens — the sidecar binary handles env interpolation itself.
+  const tomlLines = [
+    `endpoint = ${JSON.stringify(endpoint)}`,
+    `scrape_interval_secs = 30`,
+    ``,
+    `[auth]`,
+    `strategy = "bearer_refresh"`,
+    `token_url = "\${LOGTURA_TAIL_TOKEN_URL}"`,
+    `token_method = "POST"`,
+    `access_token_json_path = "$.access_token"`,
+    `expires_in_json_path = "$.expires_in"`,
+    ``,
+    `[auth.token_headers]`,
+    `authorization = "Bearer \${LOGTURA_TAIL_TOKEN}"`,
+    ``,
+    `[rows]`,
+    // Supabase analytics envelope is { result: [...], error: null } —
+    // single nest. Live-verified 2026-05-12 against the deployed API.
+    `json_path = "$.result"`,
+  ];
+  const cfgPath = `/tmp/logtura-supabase-${connKey}.toml`;
+  const script = [
+    `cat > ${cfgPath} <<'EOF'`,
+    ...tomlLines,
+    `EOF`,
+    `exec logtura-http-client --config ${cfgPath}`,
+  ].join("\n");
+  return [
+    `    type: exec`,
+    `    mode: streaming`,
+    `    command:`,
+    `      - sh`,
+    `      - -c`,
+    `      - |`,
+    ...script.split("\n").map((l) => `        ${l}`),
+    `    decoding:`,
+    `      codec: json`,
+    `    framing:`,
+    `      method: newline_delimited`,
+  ].join("\n");
+}
 
 /** Build the normalize remap. Logflare's response is wrapped
  *  (`{ result: { result: [...] } }`), so we extract the array,
@@ -253,12 +358,13 @@ function edgeNormalizeYaml(
       : `  # script == "" means this event is for an unselected function; drop`;
 
   const vrl = [
-    // Wrapped shape: { result: { result: [...] } }. The outer
-    // `result` is the Management API envelope; the inner `result`
-    // is the Logflare query result. Defaults to [] if either layer
-    // is missing. Keeps a transient API hiccup from failing the
-    // whole transform.
-    `records = array(.result.result) ?? []`,
+    // Real Supabase analytics response shape is
+    //   { result: [<records>], error: null }
+    // (single-nest — the docs/older clients showed double-nest but
+    // the deployed API is flat). The exec-source path uses a JSON
+    // path of `$.result` to extract this array; the http_client
+    // path lands the whole envelope here and we unwrap inside VRL.
+    `records = array(.result) ?? array(.) ?? []`,
     `out = []`,
     `for_each(records) -> |_i, rec| {`,
     `  fn_id = string(rec.function_id) ?? ""`,
@@ -266,16 +372,18 @@ function edgeNormalizeYaml(
     ...slugLookup,
     slugMissLine,
     `  if script != "" {`,
-    `    status = int(rec.status_code) ?? 200`,
-    // Status-code based level. Supabase Edge logs don't carry a
-    // semantic level on the invocation summary, so the HTTP
-    // response is the strongest signal we have.
+    // No status_code on function_edge_logs (HTTP envelope lives on
+    // edge_logs not function_edge_logs). Default level is "info";
+    // event_message text drives warn/error escalation when it
+    // matches obvious failure tokens.
     `    level = "info"`,
-    `    if status >= 400 { level = "warn" }`,
-    `    if status >= 500 { level = "error" }`,
-    `    err = status >= 500`,
     `    body = string(rec.event_message) ?? ""`,
-    `    if body == "" { body = "supabase-edge status=" + to_string(status) }`,
+    // Order matters: warn first (less specific), then error overrides
+    // so any match on error keywords wins regardless of warn match.
+    `    if match(body, r'(?i)\\b(warn|warning|deprecated)\\b') { level = "warn" }`,
+    `    if match(body, r'(?i)\\b(error|exception|traceback|panic|failed)\\b') { level = "error" }`,
+    `    err = level == "error"`,
+    `    if body == "" { body = "supabase-edge " + script }`,
     // Microsecond to millisecond conversion. Vector accepts integer
     // epoch in either; downstream sinks formatting timestamps want
     // a consistent unit. Other drivers leave .timestamp as-is from
@@ -289,9 +397,8 @@ function edgeNormalizeYaml(
     `      "error": err,`,
     `      "message": "[" + script + "] " + body,`,
     `      "timestamp": ts_us / 1000,`,
-    `      "status_code": status,`,
-    `      "method": string(rec.method) ?? "",`,
     `      "execution_time_ms": int(rec.execution_time_ms) ?? 0,`,
+    `      "deployment_id": string(rec.deployment_id) ?? "",`,
     `      "id": string(rec.id) ?? "",`,
     `      "function_id": fn_id,`,
     `    })`,

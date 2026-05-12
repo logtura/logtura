@@ -79,6 +79,18 @@ export interface ConnectionRef {
   id: string;
   externalAccountId: string | null;
   displayName: string;
+  /** Hint to the driver about the credential's nature without
+   *  exposing the secret itself. `"static"` means a stable bearer
+   *  (PAT, long-lived API key) — drivers can poll the endpoint
+   *  directly with the env-injected value. `"refreshable"` means
+   *  the credential rotates and a host-managed sidecar (e.g.
+   *  logtura-http-client) is responsible for keeping a fresh token
+   *  available. Drivers that don't care leave the default
+   *  ("static") behavior.
+   *
+   *  Hosts set this from credential shape (e.g. "is there a
+   *  refresh_token field?"). The OSS surface only sees the kind. */
+  credentialKind?: "static" | "refreshable";
 }
 
 /** Caller view of a single source row for the driver. `id` is the
@@ -118,9 +130,13 @@ export interface EnvVarSpec {
 }
 
 /** Dockerfile install step the driver needs in the forwarder image
- *  (for self-deploy users). */
+ *  (for self-deploy users). Use `install` for a shell command that
+ *  needs `RUN` prefixing (apt installs, curl, etc). Use `directive`
+ *  for raw Dockerfile lines like `COPY --from=<image>:<tag> ...` or
+ *  `ARG ...` that aren't shell commands and shouldn't be wrapped. */
 export interface DockerfileDep {
-  install: string;
+  install?: string;
+  directive?: string;
   aptPackages?: string[];
 }
 
