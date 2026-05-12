@@ -29,7 +29,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Node 24 because the bundled npm is 11.x and we need
+          # npm 11.5+ for trusted publishing (OIDC). Node 22's
+          # bundled npm is 10.9, which doesn't know how to do the
+          # OIDC dance.
+          node-version: 24
           cache: pnpm
           # NOTE: no `registry-url` here. setup-node's registry-url
           # writes an .npmrc with `_authToken=${NODE_AUTH_TOKEN}`,
@@ -49,13 +53,6 @@ jobs:
 
       - name: test
         run: pnpm vitest run
-
-      - name: upgrade npm (Trusted Publishing needs >= 11.5)
-        # Node 22 ships with npm 10.9. npm's OIDC trusted-publishing
-        # flow was added in npm 11.5, so we explicitly upgrade. pnpm
-        # publish delegates to `npm publish` for the actual registry
-        # call, so the bundled npm version is what matters.
-        run: npm install -g npm@latest
 
       - name: publish to npm
         # --provenance opts into npm's OIDC trusted-publishing flow.
