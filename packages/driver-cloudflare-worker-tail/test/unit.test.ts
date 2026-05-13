@@ -19,8 +19,8 @@ const workerSource = (id: string, name: string) => ({
   metadata: null,
 });
 
-// parseFormData + connectFlow + formFields live in the SaaS-side
-// connect adapter (src/providers/connect/cloudflare-worker-tail.ts).
+// parseFormData + connectFlow + formFields are intentionally outside
+// the driver; the CLI passes explicit credentials.
 
 describe("capabilities", () => {
   it("declares list-only selection (Cloudflare tail sessions are script-scoped)", () => {
@@ -98,8 +98,14 @@ describe("generatePipeline", () => {
     expect(y).toContain("type: remap");
     // Per-event level: structured-log scan + outcome classifier.
     expect(y).toContain("has_error_log");
+    expect(y).toContain("error_parts = []");
+    expect(y).toContain('if lvl == "error" { error_parts = push(error_parts, s) }');
     expect(y).toContain("worker_failed");
     expect(y).toContain("client_aborted");
+    expect(y).toContain(".error_reason = outcome");
+    expect(y).toContain("normalized_exceptions = []");
+    expect(y).toContain('.exceptions = normalized_exceptions');
+    expect(y).not.toContain(".exception =");
     expect(y).toContain('stack = string(ex.stack) ?? ""');
     expect(y).toContain('name + ": " + msg + "\\n" + stack');
     // [script] prefix in the synthesized message body. Source-side
@@ -111,6 +117,12 @@ describe("generatePipeline", () => {
     // showed only the surviving info logs, hiding the real cause.
     expect(y).toContain(
       'else if worker_failed { "outcome=" + outcome + " | " + join!(parts, " | ") }',
+    );
+    // Console-error-triggered events render only error-level console
+    // lines, so an invocation's earlier console.info context does
+    // not become the Slack rollup sample.
+    expect(y).toContain(
+      'else if length(error_parts) > 0 { join!(error_parts, " | ") }',
     );
   });
 

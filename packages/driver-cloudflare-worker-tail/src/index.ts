@@ -30,11 +30,8 @@ interface CfWorkerScript {
   modified_on?: string;
 }
 
-// Token-page URL with permissionGroupKeys pre-checked, the OAuth
-// button labels, and the FormData parser all live in the SaaS-side
-// connect adapter (src/providers/connect/cloudflare-worker-tail.ts).
-// This package only carries what the renderer + a self-hoster CLI
-// would consume: id, discovery, codegen, runtime spec.
+// This package only carries what the renderer and CLI consume:
+// id, discovery, codegen, and runtime spec.
 
 export const cloudflareWorkerTailDriver: ProviderDriver<CloudflareCredentials> = {
   id: "cloudflare-worker-tail",
@@ -42,7 +39,7 @@ export const cloudflareWorkerTailDriver: ProviderDriver<CloudflareCredentials> =
   sourceLabel: "Worker",
   // Cloudflare tail sessions are still script-scoped, but
   // logtura-cf-tail multiplexes the selected list in one process.
-  // Hosts wanting "all" still expand the selection at picking time
+  // Callers wanting "all" still expand the selection at picking time
   // because the API doesn't expose one account-wide stream.
   capabilities: { selection: "list" },
   verifyCredentials: verifyCfCredentials,
@@ -162,11 +159,8 @@ export const cloudflareWorkerTailDriver: ProviderDriver<CloudflareCredentials> =
       });
     }
     const runtime = cfRuntimeSpec({
-      // Bare token-page URL; the connect-time pre-checked scopes URL
-      // lives in the host's connect adapter. helpUrl is rendered
-      // next to the env var on a deploy's "missing creds" view,
-      // where we can't assume the user wants the worker-tail scope
-      // set.
+      // Bare token-page URL. The CLI renders this next to the env var;
+      // a pre-scoped token URL belongs outside the driver.
       helpUrl: "https://dash.cloudflare.com/profile/api-tokens",
     });
     runtime.dockerfileDeps = [
@@ -220,7 +214,8 @@ function workerExecSourceYaml(connKey: string, sources: SourceRef[]): string {
 }
 
 /** Flattens a `wrangler tail --format json` event into the uniform
- *  pipeline shape (.message, .level, .error, .script, .timestamp).
+ *  pipeline shape (.message, .level, .error, .script, .timestamp)
+ *  plus canonical error fields (.error_reason, .exceptions).
  *  CF tail event shape: outcome, scriptName, exceptions[],
  *  logs[{message[], level}], event, eventTimestamp. */
 function workerNormalizeYaml(inputKeys: string[]): string {
@@ -248,19 +243,37 @@ function workerNormalizeYaml(inputKeys: string[]): string {
     `client_aborted = outcome == "canceled" || outcome == "responseStreamDisconnected"`,
     `.error = exc_count > 0 || worker_failed || has_error_log`,
     `.level = if .error { "error" } else if has_warn_log || client_aborted || outcome == "unknown" { "warn" } else { "info" }`,
+    `if worker_failed {`,
+    `  .error_reason = outcome`,
+    `} else {`,
+    `  del(.error_reason)`,
+    `}`,
+    `normalized_exceptions = []`,
     `parts = []`,
+    `error_parts = []`,
+    `warn_parts = []`,
     `for_each(array(.logs) ?? []) -> |_, log| {`,
+    `  lvl = string(log.level) ?? ""`,
     `  for_each(array(log.message) ?? []) -> |_, m| {`,
     `    s = if is_string(m) { string!(m) } else { encode_json(m) }`,
     `    parts = push(parts, s)`,
+    `    if lvl == "error" { error_parts = push(error_parts, s) }`,
+    `    if lvl == "warn" { warn_parts = push(warn_parts, s) }`,
     `  }`,
     `}`,
     `for_each(array(.exceptions) ?? []) -> |_, ex| {`,
     `  name = string(ex.name) ?? "Error"`,
     `  msg = string(ex.message) ?? ""`,
     `  stack = string(ex.stack) ?? ""`,
+    `  normalized = { "name": name, "message": msg, "stack": stack }`,
+    `  normalized_exceptions = push(normalized_exceptions, normalized)`,
     `  rendered = if stack != "" { name + ": " + msg + "\\n" + stack } else { name + ": " + msg }`,
     `  parts = push(parts, rendered)`,
+    `}`,
+    `if length(normalized_exceptions) > 0 {`,
+    `  .exceptions = normalized_exceptions`,
+    `} else {`,
+    `  del(.exceptions)`,
     `}`,
     // When the worker actually failed (exceededMemory, exceededCpu,
     // exception with no JS-level exception body, scriptNotFound,
@@ -270,7 +283,7 @@ function workerNormalizeYaml(inputKeys: string[]): string {
     // real cause. Also covers the empty-parts case (CF killed before
     // anything logged) so the body is never bare. Slack returns 400
     // on {"text":""} so the body has to be non-empty.
-    `body = if length(parts) == 0 { "outcome=" + outcome } else if worker_failed { "outcome=" + outcome + " | " + join!(parts, " | ") } else { join!(parts, " | ") }`,
+    `body = if length(parts) == 0 { "outcome=" + outcome } else if worker_failed { "outcome=" + outcome + " | " + join!(parts, " | ") } else if length(error_parts) > 0 { join!(error_parts, " | ") } else if length(warn_parts) > 0 { join!(warn_parts, " | ") } else { join!(parts, " | ") }`,
     // Prefix with [script] so monitors WITHOUT a rollup step still
     // deliver tagged messages to Slack. Without this, a console.log
     // of a structured object lands in Slack as a bare JSON fragment

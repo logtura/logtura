@@ -29,6 +29,9 @@ importers:
       '@logtura/core':
         specifier: workspace:*
         version: link:../core
+      '@logtura/custom-vector':
+        specifier: workspace:*
+        version: link:../custom-vector
       '@logtura/destination-datadog-metrics':
         specifier: workspace:*
         version: link:../destination-datadog-metrics
@@ -53,6 +56,9 @@ importers:
       '@logtura/driver-supabase-edge-logs':
         specifier: workspace:*
         version: link:../driver-supabase-edge-logs
+      '@logtura/driver-vercel-logs':
+        specifier: workspace:*
+        version: link:../driver-vercel-logs
       '@logtura/supabase-shared':
         specifier: workspace:*
         version: link:../supabase-shared
@@ -84,6 +90,22 @@ importers:
 
   packages/core:
     devDependencies:
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.6(@types/node@22.19.19)(@vitest/coverage-istanbul@4.1.5(vitest@4.1.6))(vite@8.0.12(@types/node@22.19.19)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0))
+
+  packages/custom-vector:
+    dependencies:
+      yaml:
+        specifier: ^2.8.1
+        version: 2.9.0
+    devDependencies:
+      '@logtura/core':
+        specifier: workspace:*
+        version: link:../core
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -188,6 +210,18 @@ importers:
       '@logtura/supabase-shared':
         specifier: workspace:*
         version: link:../supabase-shared
+    devDependencies:
+      '@logtura/core':
+        specifier: workspace:*
+        version: link:../core
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.6(@types/node@22.19.19)(@vitest/coverage-istanbul@4.1.5(vitest@4.1.6))(vite@8.0.12(@types/node@22.19.19)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0))
+
+  packages/driver-vercel-logs:
     devDependencies:
       '@logtura/core':
         specifier: workspace:*

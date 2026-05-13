@@ -13,8 +13,10 @@ import type {
   GenerateInput,
   GeneratorConnection,
   GeneratorMonitor,
+  GeneratedRuntimeAsset,
   ProviderDriver,
   ProviderSelection,
+  RenderDockerfileOptions,
   Source,
   SourceRef,
 } from "./types";
@@ -110,8 +112,11 @@ export function generateBundle(input: GenerateInput): GeneratedBundle {
   // accounts both wanting CLOUDFLARE_API_TOKEN) collapses to one
   // entry. First-write-wins, which matches what the forwarder
   // image's single env exposes anyway.
+  const runtimeAssets = collectRuntimeAssets(resolved);
   const dockerDeps = resolved.flatMap((r) => r.pipeline.dockerfileDeps);
-  const dockerfile = renderDockerfile(dockerDeps);
+  const dockerfile = renderDockerfile(dockerDeps, {
+    includeRuntimeAssets: runtimeAssets.length > 0,
+  });
 
   const seenEnv = new Set<string>();
   const envVars: BundleEnvVar[] = [];
@@ -217,6 +222,7 @@ export function generateBundle(input: GenerateInput): GeneratedBundle {
   return {
     vectorYaml,
     dockerfile,
+    runtimeAssets,
     runCommand,
     envVars,
     selectedCount: resolved.reduce((n, r) => n + r.sources.length, 0),
@@ -226,6 +232,34 @@ export function generateBundle(input: GenerateInput): GeneratedBundle {
         : `${input.monitors.length} monitor${input.monitors.length === 1 ? "" : "s"} → ${sinkCount} sink${sinkCount === 1 ? "" : "s"}`,
     componentManifest,
   };
+}
+
+function collectRuntimeAssets(
+  resolved: ResolvedConnection[],
+): GeneratedRuntimeAsset[] {
+  const out: GeneratedRuntimeAsset[] = [];
+  const seen = new Set<string>();
+  for (const r of resolved) {
+    for (const asset of r.pipeline.runtimeAssets ?? []) {
+      validateAssetPath(asset.path, r.driver.id);
+      const key = `${r.driver.id}/${asset.path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...asset, driverId: r.driver.id });
+    }
+  }
+  return out;
+}
+
+function validateAssetPath(path: string, driverId: string) {
+  if (
+    path === "" ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path.split("/").some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new Error(`Invalid runtime asset path for ${driverId}: ${path}`);
+  }
 }
 
 interface ResolvedConnection {
@@ -296,7 +330,7 @@ function renderVectorYaml(
       }
     }
     // Driver-provided manifest entries describe the emitted
-    // components. Hosts that display per-component status use these.
+    // components. Consumers that display per-component status use these.
     for (const m of r.pipeline.manifest ?? []) {
       componentManifest.push(m);
     }
@@ -527,18 +561,27 @@ function renderVectorYaml(
           },
         });
       }
-      sinkSinkKeys.push({ sinkKey: bundle.sink.key, yaml: bundle.sink.yaml });
-      componentManifest.push({
-        id: bundle.sink.key,
-        role: "sink",
-        category: "primary",
-        label: `${dDriver.displayName} · ${sinkSpec.destination.displayName}`,
-        links: {
-          sinkId: sinkSpec.sink.id,
-          destinationId: sinkSpec.destination.id,
-          monitorId: m.monitor.id,
-        },
-      });
+      const emittedSinks = [
+        ...(bundle.sink ? [bundle.sink] : []),
+        ...(bundle.sinks ?? []),
+      ];
+      if (emittedSinks.length === 0) {
+        throw new Error(`Destination ${dDriver.id} did not emit a sink`);
+      }
+      for (const emittedSink of emittedSinks) {
+        sinkSinkKeys.push({ sinkKey: emittedSink.key, yaml: emittedSink.yaml });
+        componentManifest.push({
+          id: emittedSink.key,
+          role: "sink",
+          category: "primary",
+          label: `${dDriver.displayName} · ${sinkSpec.destination.displayName}`,
+          links: {
+            sinkId: sinkSpec.sink.id,
+            destinationId: sinkSpec.destination.id,
+            monitorId: m.monitor.id,
+          },
+        });
+      }
     }
   }
 
@@ -665,17 +708,26 @@ function renderVectorYaml(
         lines.push(t.yaml);
         lines.push("");
       }
-      lines.push(`  ${bundle.sink.key}:`);
-      lines.push(bundle.sink.yaml);
-      lines.push("");
-      componentManifest.push({
-        id: bundle.sink.key,
-        role: "metrics",
-        category: "plumbing",
-        label: `Metrics · ${m.destination.displayName}`,
-        detail: dDriver.displayName,
-        links: { destinationId: m.destination.id },
-      });
+      const emittedSinks = [
+        ...(bundle.sink ? [bundle.sink] : []),
+        ...(bundle.sinks ?? []),
+      ];
+      if (emittedSinks.length === 0) {
+        throw new Error(`Destination ${dDriver.id} did not emit a metrics sink`);
+      }
+      for (const emittedSink of emittedSinks) {
+        lines.push(`  ${emittedSink.key}:`);
+        lines.push(emittedSink.yaml);
+        lines.push("");
+        componentManifest.push({
+          id: emittedSink.key,
+          role: "metrics",
+          category: "plumbing",
+          label: `Metrics · ${m.destination.displayName}`,
+          detail: dDriver.displayName,
+          links: { destinationId: m.destination.id },
+        });
+      }
     }
   }
 
@@ -910,7 +962,7 @@ function renderStepYaml(step: FilterStep, input: string): string | null {
  *  baked into the image. */
 export function renderDockerfile(
   deps: DockerfileDep[],
-  opts: { mountVectorYamlAtRuntime?: boolean } = {},
+  opts: RenderDockerfileOptions = {},
 ): string {
   const aptPackages = new Set<string>();
   for (const d of deps) {
@@ -929,6 +981,9 @@ export function renderDockerfile(
   const copyVectorLine = opts.mountVectorYamlAtRuntime
     ? ""
     : "COPY vector.yaml /etc/vector/vector.yaml\n";
+  const copyAssetsLine = opts.includeRuntimeAssets
+    ? "COPY assets/ /opt/logtura/assets/\nRUN chmod -R a+rX /opt/logtura/assets\n"
+    : "";
 
   return `# Generated by logtura — https://logtura.dev
 # Vector-based forwarder. Tails selected log sources and routes them
@@ -939,6 +994,7 @@ FROM timberio/vector:latest-debian
 ${aptList ? `RUN apt-get update && apt-get install -y --no-install-recommends ${aptList} && rm -rf /var/lib/apt/lists/*` : ""}
 ${installSteps}
 
+${copyAssetsLine}
 ${copyVectorLine}
 # Heartbeat (Prometheus exporter) — scrape from your monitoring stack.
 EXPOSE 9598
