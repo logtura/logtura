@@ -16,8 +16,7 @@ logtura install-zip -c logtura.yaml -o logtura-forwarder.tgz
 
 The CLI includes the current Logtura drivers and destinations. Under the hood
 it parses `logtura.yaml`, calls `@logtura/core`, and writes the same style of
-`vector.yaml`, Dockerfile, env manifest, and component manifest used by the
-hosted product.
+`vector.yaml`, Dockerfile, env manifest, and component manifest.
 
 ## logtura.yaml
 
