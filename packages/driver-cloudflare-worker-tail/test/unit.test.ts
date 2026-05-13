@@ -23,7 +23,7 @@ const workerSource = (id: string, name: string) => ({
 // connect adapter (src/providers/connect/cloudflare-worker-tail.ts).
 
 describe("capabilities", () => {
-  it("declares list-only selection (wrangler tail is per-script)", () => {
+  it("declares list-only selection (Cloudflare tail sessions are script-scoped)", () => {
     expect(cloudflareWorkerTailDriver.capabilities.selection).toBe("list");
   });
 });
@@ -38,7 +38,7 @@ describe("generatePipeline", () => {
     ).toThrow(/does not support "all"/);
   });
 
-  it("emits one exec source per worker + a normalize transform", () => {
+  it("emits one multiplexing exec source plus per-worker metric filters", () => {
     const pipe = cloudflareWorkerTailDriver.generatePipeline({
       connection: dummyConnection,
       selection: {
@@ -51,29 +51,41 @@ describe("generatePipeline", () => {
     });
     const sources = pipe.components.filter((c) => c.kind === "source");
     const transforms = pipe.components.filter((c) => c.kind === "transform");
-    expect(sources).toHaveLength(2);
-    expect(transforms).toHaveLength(1);
-    expect(pipe.outputKey).toBe(transforms[0]!.key);
+    expect(sources).toHaveLength(1);
+    expect(transforms).toHaveLength(4);
+    expect(pipe.outputKey).toBe("cf_worker_con_x_by_worker");
     // Connection-scoped keys so multiple CF accounts can coexist
     // in one bundle without colliding on identically-named workers.
-    expect(sources[0]!.key).toBe("cf_worker_con_x_my_worker");
+    expect(sources[0]!.key).toBe("cf_worker_con_x_tail");
     expect(sources[0]!.yaml).toContain("type: exec");
+    expect(sources[0]!.yaml).toContain("logtura-cf-tail --config");
     expect(sources[0]!.yaml).toContain(
-      "wrangler tail my-worker --format json",
+      'scripts = ["my-worker", "other-worker"]',
     );
-    expect(sources[0]!.yaml).toContain("jq -c --unbuffered");
+    expect(sources[0]!.yaml).toContain("method: newline_delimited");
+    expect(
+      transforms.some((t) =>
+        t.yaml.includes('(string(.script) ?? "") == "my-worker"'),
+      ),
+    ).toBe(true);
+    expect(transforms.at(-1)?.yaml).toContain(
+      'inputs: ["cf_worker_con_x_src_a", "cf_worker_con_x_src_b"]',
+    );
   });
 
-  it("refuses shell-suspicious worker names", () => {
-    expect(() =>
-      cloudflareWorkerTailDriver.generatePipeline({
-        connection: dummyConnection,
-        selection: {
-          kind: "list",
-          sources: [workerSource("src_a", "evil; rm -rf /")],
-        },
-      }),
-    ).toThrow(/suspicious worker name/);
+  it("keeps one source while carrying every selected worker name", () => {
+    const selected = Array.from({ length: 12 }, (_, i) =>
+      workerSource(`src_${i}`, `worker-${i}`),
+    );
+    const pipe = cloudflareWorkerTailDriver.generatePipeline({
+      connection: dummyConnection,
+      selection: { kind: "list", sources: selected },
+    });
+    const sources = pipe.components.filter((c) => c.kind === "source");
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.yaml).toContain(
+      `scripts = [${selected.map((s) => JSON.stringify(s.externalId)).join(", ")}]`,
+    );
   });
 
   it("normalize remap classifies error vs warn vs info from outcome + logs", () => {
@@ -88,6 +100,8 @@ describe("generatePipeline", () => {
     expect(y).toContain("has_error_log");
     expect(y).toContain("worker_failed");
     expect(y).toContain("client_aborted");
+    expect(y).toContain('stack = string(ex.stack) ?? ""');
+    expect(y).toContain('name + ": " + msg + "\\n" + stack');
     // [script] prefix in the synthesized message body. Source-side
     // tagging so non-rollup monitors still ship a labeled body.
     expect(y).toContain('"[" + .script + "] "');
@@ -108,12 +122,10 @@ describe("generatePipeline", () => {
     const names = pipe.envVars.map((e) => e.name);
     expect(names).toContain("CLOUDFLARE_API_TOKEN");
     expect(names).toContain("CLOUDFLARE_ACCOUNT_ID");
-    // The wrangler dep needs node + npm; the driver bakes this into
-    // the Dockerfile contribution.
-    expect(pipe.dockerfileDeps[0]?.install).toContain("wrangler@latest");
+    expect(pipe.dockerfileDeps[0]?.directive).toContain("logtura-cf-tail");
   });
 
-  it("manifest echoes Source.id for host UI linking", () => {
+  it("manifest records a multiplexed source with per-worker children", () => {
     const pipe = cloudflareWorkerTailDriver.generatePipeline({
       connection: dummyConnection,
       selection: {
@@ -121,11 +133,18 @@ describe("generatePipeline", () => {
         sources: [workerSource("src_chosen", "my-worker")],
       },
     });
-    const sourceEntry = (pipe.manifest ?? []).find(
+    const sourceEntries = (pipe.manifest ?? []).filter(
       (m) => m.role === "source",
     );
-    expect(sourceEntry?.links?.sourceId).toBe("src_chosen");
-    expect(sourceEntry?.links?.connectionId).toBe("con_x");
+    const parent = sourceEntries.find((m) => m.id === "cf_worker_con_x_tail");
+    const child = sourceEntries.find((m) => m.id === "cf_worker_con_x_src_chosen");
+    expect(parent?.detail).toBe("1 worker");
+    expect(parent?.links?.sourceId).toBeUndefined();
+    expect(parent?.links?.connectionId).toBe("con_x");
+    expect(child?.label).toBe("Worker · my-worker");
+    expect(child?.detail).toBe("my-worker");
+    expect(child?.links?.sourceId).toBe("src_chosen");
+    expect(child?.links?.parentId).toBe("cf_worker_con_x_tail");
   });
 });
 
