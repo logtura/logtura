@@ -39,6 +39,7 @@ describe("vercelLogsDriver", () => {
     expect(sources[0]!.yaml).toContain(
       "exec bun /opt/logtura/assets/vercel-logs/logtura-vercel-tail.mjs",
     );
+    expect(sources[0]!.yaml).toContain("include_stderr: false");
     expect(sources[0]!.yaml).toContain('"id":"prj_test"');
     expect(sources[0]!.yaml).toContain('"id":"prj_other"');
     expect(sources[0]!.yaml).not.toContain("/v6/deployments");
@@ -57,6 +58,12 @@ describe("vercelLogsDriver", () => {
     expect(pipe.runtimeAssets?.[0]?.content).toContain("/runtime-logs");
     expect(pipe.runtimeAssets?.[0]?.content).toContain(
       "await Promise.all(projects.map",
+    );
+    expect(pipe.runtimeAssets?.[0]?.content).toContain(
+      "const HELPER_ERROR_COOLDOWN_MS = 5 * 60 * 1000",
+    );
+    expect(pipe.runtimeAssets?.[0]?.content).toContain(
+      "helperErrorSuppressed",
     );
   });
 
