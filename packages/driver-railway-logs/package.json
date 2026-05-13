@@ -1,14 +1,14 @@
 {
-  "name": "@logtura/driver-vercel-logs",
+  "name": "@logtura/driver-railway-logs",
   "version": "0.2.10",
-  "description": "Logtura provider driver for Vercel Runtime Logs via the REST API.",
+  "description": "Logtura provider driver for Railway environment log streams.",
   "license": "Apache-2.0",
   "author": "Erik Aronesty (Logtura)",
   "homepage": "https://github.com/logtura/logtura#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/logtura/logtura.git",
-    "directory": "packages/driver-vercel-logs"
+    "directory": "packages/driver-railway-logs"
   },
   "bugs": {
     "url": "https://github.com/logtura/logtura/issues"

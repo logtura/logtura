@@ -1,6 +1,6 @@
 {
   "name": "@logtura/cli",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "OSS CLI for validating Logtura configs and generating Vector forwarder bundles.",
   "license": "Apache-2.0",
   "author": "Erik Aronesty (Logtura)",
@@ -42,6 +42,7 @@
     "@logtura/driver-cloudflare-ai-gateway": "workspace:*",
     "@logtura/driver-cloudflare-worker-tail": "workspace:*",
     "@logtura/driver-fly-log-tail": "workspace:*",
+    "@logtura/driver-railway-logs": "workspace:*",
     "@logtura/driver-supabase-edge-logs": "workspace:*",
     "@logtura/driver-vercel-logs": "workspace:*",
     "@logtura/supabase-shared": "workspace:*",
